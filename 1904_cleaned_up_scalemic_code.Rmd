@@ -1,0 +1,1285 @@
+---
+title: "SCALEMIC analysis of beta-diversity"
+output: html_notebook
+author: Anna Heintz-Buschart
+---
+
+Note: This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. Try executing this chunk by clicking the *Run* button within the chunk. When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r include=FALSE}
+a1 <- pi/2
+b <- pi
+c1 <- a1*pi/2
+theta <- log(1:1000,c*exp(1))[10*1:100]
+df <- data.frame(x1=exp(a1*theta)*cos(b*theta), 
+                 y1=exp(a1*theta)*sin(b*theta))
+{plot(1,type="n",axes=F,ann=F,ylim=1.15*c(-max(abs(df)),max(abs(df))),xlim=1.15*c(-max(abs(df)),max(abs(df))))
+points(df[,c("x1","y1")],cex=exp(theta-1)[1:100]/3)
+points(-df[,c("x1","y1")],cex=exp(theta-1)[1:100]/3)
+points(df$y1,-df$x1,cex=exp(theta-1)[1:100]/3)
+points(-df$y1,df$x1,cex=exp(theta-1)[1:100]/3)}
+```
+
+
+####Presets and reading data####
+Environmental data for the plots and an OTU table were read from disk (to run this notebook, load the environment below). 
+```{r}
+load("1904_cleaned_up_scalemic_code_WS.RData")
+```
+
+A presence/absence version of the OTU-table is prepared, as well as a rarefied version and a presence/absence version of this. In addition, OTU tables containing only OTUs of *Glomus* or of *Claroidoglomus* were prepared. Colours for the subplots are chosen from the "spectral" palette. 
+```{r message=FALSE}
+library(RColorBrewer)
+library(vegan)
+
+spcolsP <- brewer.pal(6,"Spectral")
+spcols <- as.vector(t(unlist(sapply(spcolsP,function(x)colorRampPalette(c("grey90",x))(7)[3:7]))))
+subplots <- paste("subplot",1:30,sep="_")
+tps <- 1:6
+tabPlots <- data.frame("sample"=1:360,
+                       "tp"=rep(1:6,each=60),
+                       "subplot"=paste("subplot",rep(rep(1:30,each=2),times=6),sep="_"),
+                       stringsAsFactors=F)
+
+env <- AMF[,1:58]
+envSubplot <- rep(as.factor(rep(1:30,each=2)),6)
+OTUS <- AMF[,59:213]
+
+otuM <- as.matrix(otuPre[,4:ncol(otuPre)])
+rownames(otuM) <- otuPre$SampleID
+otuMR <- rrarefy(otuM,min(rowSums(otuM)))
+otuB <- matrix(as.numeric(otuM>0),ncol=ncol(otuM),nrow=nrow(otuM),dimnames = dimnames(otuM))
+otuRB <- matrix(as.numeric(otuMR>0),ncol=ncol(otuMR),nrow=nrow(otuMR),dimnames = dimnames(otuMR))
+
+glomusM <- as.matrix(glomusPre[,4:ncol(glomusPre)])
+rownames(glomusM) <- glomusPre$SampleID
+glomusB <- matrix(as.numeric(glomusM>0),ncol=ncol(glomusM),nrow=nrow(glomusM),dimnames = dimnames(glomusM))
+
+claroM <- as.matrix(claroPre[,4:ncol(claroPre)])
+rownames(claroM) <- claroPre$SampleID
+claroB <- matrix(as.numeric(claroM>0),ncol=ncol(claroM),nrow=nrow(claroM),dimnames = dimnames(claroM))
+
+scheme <- list()
+scheme$sites <- data.frame("x"=jitter(rep(1:6,times=5),amount=0.2),"y"=jitter(rep(5:1,each=6),amount=0.2),stringsAsFactors = F)
+
+{plot(rep(1:6,times=5),rep(5:1,each=6),col=spcols,pch=16,cex=5,axes=F,ann=F,xlim=c(0.2,6.8),ylim=c(0.2,5.8))
+text(rep(1:6,times=5),rep(5:1,each=6),labels=1:30)}
+
+```
+
+A few functions are custom-defined. In particular, we make use of the betapart package - however, the functions adjust the comparisons between samples to take into account the design which has always two samples taken at each time point in the same subplot. 
+```{r}
+#basic module:
+subset.betapart.core <- function(bpc, rows) 
+{
+  bpc$data <- bpc$data[rows, ]
+  bpc$shared <- bpc$shared[rows, rows]
+  bpc$not.shared <- bpc$not.shared[rows, rows]
+  bpc$sumSi <- sum(diag(bpc$shared))
+  bpc$St <- sum(colSums(bpc$data) > 0)
+  bpc$a <- bpc$sumSi - bpc$St
+  bpc$sum.not.shared <- bpc$sum.not.shared[rows, rows]
+  bpc$max.not.shared <- bpc$max.not.shared[rows, rows]
+  bpc$min.not.shared <- bpc$min.not.shared[rows, rows]
+  return(bpc)
+}
+
+#for p/a data
+beta.sample.kezia <- function (x, index.family = "sorensen", sites = nrow(x$data), tps = 6, repl = 2, samples = 64) 
+{
+  if (!inherits(x, "betapart")) {
+    x <- betapart.core(x)
+  }
+  if(samples > repl^tps) {
+    #print(paste("Number of requested samples greater than maximum number of permutations. Max. permutations",
+    #            repl^tps, "used."))
+    samples <- repl^tps
+  }
+  #pb <- txtProgressBar(min = 0, max = samples, style = 3)
+  if (sites > nrow(x$data)) 
+    stop("More sites requested for sample than are in the dataset")
+  index.family <- match.arg(index.family, c("jaccard", "sorensen"))
+  results.n <- as.data.frame(matrix(nrow = samples, ncol = 3))
+  if(repl == 2){
+    sampleVec <- sample(1:(repl^tps),samples)
+    for (i in 1:samples) {
+      pos <- as.integer(intToBits(sampleVec[i]-1))[1:tps]
+      sample.pos <- 2*1:tps-pos
+      x.sample <- subset.betapart.core(x, sample.pos)
+      x.beta <- beta.multi(x.sample, index.family)
+      results.n[i, ] <- unlist(x.beta)
+      #setTxtProgressBar(pb, i)
+    }
+  }else{
+    stop("function is only implemented for two replicates")
+  }  
+  #close(pb)
+  names(results.n) <- names(x.beta)
+  result <- list(sampled.values = results.n, mean.values = sapply(results.n, 
+                                                                  mean), sd.values = sapply(results.n, sd))
+  return(result)
+}
+
+#twin for abundance data (not used in the notebook)
+# beta.sample.abund.kezia <- function (x, index.family = "bray", tps = 6, repl = 2, samples = 64) 
+# {
+#   index.family <- match.arg(index.family, c("bray", "ruzicka"))
+#   if(samples > repl^tps) {
+#     # print(paste("Number of requested samples greater than maximum number of permutations. Max. permutations",
+#     #              repl^tps, "used."))
+#     samples <- repl^tps
+#   }
+#   #pb <- txtProgressBar(min = 0, max = samples, style = 3)
+#   results.n <- as.data.frame(matrix(nrow = samples, ncol = 3))
+#   if(repl == 2){
+#     sampleVec <- sample(1:(repl^tps),samples)
+#     for (i in 1:samples) {
+#       pos <- as.integer(intToBits(sampleVec[i]-1))[1:tps]
+#       sample.pos <- 2*1:tps-pos
+#       x.sample <- x[sample.pos,]
+#       x.beta <- beta.multi.abund(x.sample, index.family)
+#       results.n[i, ] <- unlist(x.beta)
+#       #setTxtProgressBar(pb, i)
+#     }
+#   }else{
+#     stop("function is only implemented for two replicates")
+#   }  
+#   #close(pb)
+#   names(results.n) <- names(x.beta)
+#   result <- list(sampled.values = results.n, mean.values = sapply(results.n, 
+#                                                                   mean), sd.values = sapply(results.n, sd))
+#   return(result)
+# }
+
+#plotting the beta-diversity over time
+plotPlotTime <- function(indices,measure,#name,
+                         x,ylab,xlab,marker) #this function is adjusted to plotting into the Notebook
+{
+  #pdf(paste0(name,".pdf"),width=17.5/2.54,height=17/2.54,pointsize=7)
+  {layout(matrix(1:36,ncol=6,nrow=6,byrow=T))
+  par(mar=c(4,4,0.5,0.2),tcl=-0.2,mgp=c(2,0.5,0),lwd=1.5)
+  for(i in 1:30) plot(x,indices[(i-1)*5+1:5,measure],type="l",ylim=c(0.1,0.8),col=spcols[i],
+                      ylab=ylab,las=1,xlab=xlab,cex.lab=9/7)
+  plot(1,type="n",axes=F,ann=F)
+  text(1,1,marker,xpd=T,cex=9/7)}
+  #dev.off()
+}
+
+#dendrograms based on temporal profiles
+dendplots <- function(indices,measure,#name,
+                      otherdist=env[,c("x","y")],xy=scheme,dcols=spcols) #this function is adjusted to plotting into the Notebook
+{
+  ppdend <- as.dist(1-cor(unlist(sapply(1:30,function(x) indices[(x-1)*5+1:5,measure]))))
+  pdend <- hclust(ppdend,method="ward.D2")
+  dend <- as.dendrogram(pdend)
+  labels_colors(dend) <- dcols[order.dendrogram(dend)]
+  #pdf(paste0(name,".pdf"),width=17.5/2.54,height=6/2.54,pointsize=8)
+  {layout(matrix(1:2,ncol=2,nrow=1))
+  par(mar=c(1,2.5,0.5,0.5))
+  plot(dend)
+  mstat <- vector()
+  msig <- vector()
+  for(i in 0:5){
+    m <- mantel(ppdend,
+                dist(otherdist[(i*60)+2*1:30,]),"spearman")
+    mstat <- append(mstat,m$statistic)
+    msig <- append(msig,m$signif)
+  }
+  par(mar=c(0.5,0.5,0.5,0.5))
+  plot(xy$sites,col=dcols,pch=16,cex=5,axes=F,ann=F)
+  box()
+  ordicluster(xy,pdend,prune=6,col=cutree(pdend,7))
+  if(any(msig<0.05)) text(1.5,1.5,round(mean(mstat),digits = 2),col="red") else text(1.5,1.5,round(mean(mstat),digits=2))}
+  #dev.off()
+  return(list("signif"=msig,"statistic"=mstat))
+}
+
+#Mantel-tests to compare dendrograms of temporal profiles to environmental variables (not used in the notebook)
+# dendmantel <- function(indices,measure,name,lname="",rname="",otherMeas=env$SoilMois,dcols=spcols,pdf=T)
+# {
+#   ppdend <- as.dist(1-cor(unlist(sapply(1:30,function(x) indices[(x-1)*5+1:5,measure]))))
+#   pdend <- hclust(ppdend,method="ward.D2")
+#   dend <- as.dendrogram(pdend)
+#   labels_colors(dend) <- dcols[order.dendrogram(dend)]
+#   ppsdend <- aggregate(otherMeas,list(rep(1:180,each=2)),mean)[,2]
+#   psdend <- as.dist(1-cor(t(unlist(sapply(1:6,function(x) ppsdend[(x-1)*30+1:30])))))
+#   sdend <- hclust(psdend,method="ward.D2")
+#   dend2 <- as.dendrogram(sdend)
+#   labels_colors(dend2) <- dcols[order.dendrogram(dend2)]
+#   if(pdf) pdf(paste0(name,".pdf"),width=17.5/2.54,height=6/2.54,pointsize=7)
+#   #layout(matrix(1:2,ncol=2,nrow=1))
+#   #par(mar=c(1,2.5,0.5,0.5))
+#   #plot(dend)
+#   mstat <- vector()
+#   msig <- vector()
+#   for(i in 0:5){
+#     m <- mantel(ppdend,
+#                 psdend,"spearman")
+#     mstat <- append(mstat,m$statistic)
+#     msig <- append(msig,m$signif)
+#   }
+#   par(mar=c(0.2,0.2,0.2,0.2))
+#   
+#   #plot(xy$sites,col=dcols,pch=16,cex=5,axes=F,ann=F)
+#   #box()
+#   #ordicluster(xy,pdend,prune=6,col=cutree(pdend,7))
+#   if(any(msig<0.05)){
+#     tanglegram( dend,  dend2 ,sort=T , sub=round(mean(mstat),digits = 2),main_left=lname,main_right = rname,lwd = 1.5)
+#   }else{
+#     tanglegram( dend,  dend2 ,sort=T,main_left=lname,main_right = rname ,lwd = 1.5)
+#   }
+#   if(pdf) dev.off()
+#   return(list("signif"=msig,"statistic"=mstat))
+# }
+
+#more comparisons of distance matrices (not used in the notebook)
+# diff.sample.kezia <- function (x, func = "euc", sites = length(x), tps = 6, repl = 2, samples = 64) 
+# {
+#   if(samples > repl^tps) {
+#     #print(paste("Number of requested samples greater than maximum number of permutations. Max. permutations",
+#     #            repl^tps, "used."))
+#     samples <- repl^tps
+#   }
+#   #pb <- txtProgressBar(min = 0, max = samples, style = 3)
+#   if (sites > length(x)) 
+#     stop("More sites requested for sample than are in the dataset")
+#   func <- match.arg(func, c("euc", "cv", "mean"))
+#   results.n <- vector("numeric", length(samples))
+#   if(repl == 2){
+#     sampleVec <- sample(1:(repl^tps),samples)
+#     for (i in 1:samples) {
+#       pos <- as.integer(intToBits(sampleVec[i]-1))[1:tps]
+#       sample.pos <- 2*1:tps-pos
+#       x.sample <- x[sample.pos]
+#       if(func=="euc"){
+#         x.value <- mean(dist(x.sample))
+#       }else if(func=="cv"){
+#         x.value <- abs(sd(x.sample)/mean(x.sample))
+#       }else if(func == "mean"){
+#         x.value <- mean(x.sample)
+#       }
+#       results.n[i] <- unlist(x.value)
+#       #setTxtProgressBar(pb, i)
+#     }
+#   }else{
+#     stop("function is only implemented for two replicates")
+#   }  
+#   #close(pb)
+#   #names(results.n) <- names(x.value)
+#   result <- list(sampled.values = results.n, mean.values = mean(results.n), sd.values = sd(results.n))
+#   return(result)
+# }
+```
+
+####Analysis of beta-diversity over time####
+
+#####Temporal turnover and beta-diversity#####
+To analyse beta-diversity between timepoints, the Soerensen indices between community structures in a subplot at consecutive time points is measured. In addition to the Soerensen index ("SOR", total dissimilarity), the Simpson dissimilarity ("SIM", replacement) and the nestedness fraction of the Soerensen index ("SNE" = SOR-SIM) are reported.
+```{r  message=FALSE}
+library(betapart)
+betaPartIndicesTimeDelta <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                   dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:5){
+    betaPartIndicesTimeDelta[5*(p-1)+t,] <- unlist(beta.sample.kezia(otuB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+  }
+  p <- p + 1
+}
+```
+This data was used as basis for Figure 3 and Figure S9. Figure 3 is regenerated here:
+```{r message=FALSE}
+library(gplots)
+{barplot2(t(as.matrix(aggregate(betaPartIndicesTimeDelta[,3],list(rep(1:5,30)),mean)[,-1])),col="grey80",names.arg = c("Apr-May","May-Jun","Jun-Aug","Aug-Oct","Oct-Nov"),las=1,xlab="beta-diversity",ci.l=t(as.matrix(aggregate(betaPartIndicesTimeDelta[,3],list(rep(1:5,30)),mean)[,-1]))-t(as.matrix(aggregate(betaPartIndicesTimeDelta[,2],list(rep(1:5,30)),sd)[,-1])),ci.u=t(as.matrix(aggregate(betaPartIndicesTimeDelta[,3],list(rep(1:5,30)),mean)[,-1]))+t(as.matrix(aggregate(betaPartIndicesTimeDelta[,2],list(rep(1:5,30)),sd)[,-1])),plot.ci=T,horiz=T)
+barplot2(t(as.matrix(aggregate(betaPartIndicesTimeDelta[,1],list(rep(1:5,30)),mean)[,-1])),col=c("grey35"),ci.l=t(as.matrix(aggregate(betaPartIndicesTimeDelta[,1],list(rep(1:5,30)),mean)[,-1]))-t(as.matrix(aggregate(betaPartIndicesTimeDelta[,1],list(rep(1:5,30)),sd)[,-1])),ci.u=t(as.matrix(aggregate(betaPartIndicesTimeDelta[,1],list(rep(1:5,30)),mean)[,-1]))+t(as.matrix(aggregate(betaPartIndicesTimeDelta[,1],list(rep(1:5,30)),sd)[,-1])),plot.ci=T,add=T,ci.color="white",horiz=T,ann=F,axes=F)}
+```
+
+#####Genus-specific temporal turnover and beta-diversity#####
+The same analysis was performed with subsets of the OTUs that belonged to the most important genera, namely *Glomus* and *Claroidoglomus*. 
+In the publication, this data is displayed in Figure S8, regenerated here for *Glomus*:
+```{r message=FALSE}
+betaPartIndicesTimeDelta_glomus <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                   dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:5){
+    betaPartIndicesTimeDelta_glomus[5*(p-1)+t,] <- unlist(beta.sample.kezia(glomusB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+  }
+  p <- p + 1
+}
+
+
+{barplot2(t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,3],list(rep(1:5,30)),mean)[,-1])),col="lightblue",names.arg = c("Apr-May","May-Jun","Jun-Aug","Aug-Oct","Oct-Nov"),las=1,xlab="beta-diversity",ci.l=t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,3],list(rep(1:5,30)),mean)[,-1]))-t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,2],list(rep(1:5,30)),sd)[,-1])),ci.u=t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,3],list(rep(1:5,30)),mean)[,-1]))+t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,2],list(rep(1:5,30)),sd)[,-1])),plot.ci=T,horiz=T)
+barplot2(t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,1],list(rep(1:5,30)),mean)[,-1])),col=c("darkblue"),ci.l=t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,1],list(rep(1:5,30)),mean)[,-1]))-t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,1],list(rep(1:5,30)),sd)[,-1])),ci.u=t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,1],list(rep(1:5,30)),mean)[,-1]))+t(as.matrix(aggregate(betaPartIndicesTimeDelta_glomus[,1],list(rep(1:5,30)),sd)[,-1])),plot.ci=T,add=T,ci.color="white",horiz=T,ann=F,axes=F)}
+```
+
+And for *Claroidoglomus*:
+```{r message=FALSE}
+betaPartIndicesTimeDelta_claro <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                   dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:5){
+    betaPartIndicesTimeDelta_claro[5*(p-1)+t,] <- unlist(beta.sample.kezia(claroB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+  }
+  p <- p + 1
+}
+
+
+{barplot2(t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,3],list(rep(1:5,30)),mean)[,-1])),col="darkolivegreen2",names.arg = c("Apr-May","May-Jun","Jun-Aug","Aug-Oct","Oct-Nov"),las=1,xlab="beta-diversity",ci.l=t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,3],list(rep(1:5,30)),mean)[,-1]))-t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,2],list(rep(1:5,30)),sd)[,-1])),ci.u=t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,3],list(rep(1:5,30)),mean)[,-1]))+t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,2],list(rep(1:5,30)),sd)[,-1])),plot.ci=T,horiz=T)
+barplot2(t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,1],list(rep(1:5,30)),mean)[,-1])),col=c("darkolivegreen"),ci.l=t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,1],list(rep(1:5,30)),mean)[,-1]))-t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,1],list(rep(1:5,30)),sd)[,-1])),ci.u=t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,1],list(rep(1:5,30)),mean)[,-1]))+t(as.matrix(aggregate(betaPartIndicesTimeDelta_claro[,1],list(rep(1:5,30)),sd)[,-1])),plot.ci=T,add=T,ci.color="white",horiz=T,ann=F,axes=F)}
+```
+
+#####Overview of temporal turnover and beta-diversity#####
+To discern which groups of samples are more or less distant, we can compare within and between group diversities. This is conceptually similar to an ANOSIM analysis.
+```{r}
+bd <- vegdist(decostand(OTUS, "pa"))
+repliFac <- rep(1:180,each=2)
+repl <- unique(repliFac)
+intRep <- vector()
+betRep <- vector()
+intPlot <- vector()
+betPlot <- vector()
+intTime <- vector()
+betTime <- vector()
+cross <- vector()
+intPlotNextTime <- vector()
+intPlotNext1 <- vector()
+intPlotNext2 <- vector()
+intPlotNext3 <- vector()
+intPlotNext4 <- vector()
+intPlot5 <- vector()
+intPlotNext5 <- vector()
+crossNextTime <- vector()
+crossNext1 <- vector()
+crossNext2 <- vector()
+crossNext3 <- vector()
+crossNext4 <- vector()
+cross5 <- vector()
+crossNext5 <- vector()
+time1 <- vector()
+time2 <- vector()
+time3 <- vector()
+time4 <- vector()
+time5 <- vector()
+time6 <- vector()
+for(x in 1:length(repl)){
+  for(y in x:length(repl)){
+    if(repl[x]!=repl[y]){
+      currBd <- median(as.matrix(bd)[repliFac==repl[x],repliFac==repl[y]])
+      if(!is.na(currBd)){
+        betRep <- append(betRep,currBd)
+        if(tabPlots$tp[2*1:180][x]!=tabPlots$tp[2*1:180][y]){
+          betTime <- append(betTime,currBd)
+          if(tabPlots$subplot[2*1:180][x]!=tabPlots$subplot[2*1:180][y]){
+            cross <- append(cross,currBd)
+            if(tabPlots$tp[2*1:180][y]-1==tabPlots$tp[2*1:180][x]){
+              crossNextTime <- append(crossNextTime,currBd)
+              if(tabPlots$tp[2*1:180][x]==1){
+                crossNext1 <- append(crossNext1,currBd)
+              }else if(tabPlots$tp[2*1:180][x]==2){
+                crossNext2 <- append(crossNext2,currBd)
+              }else if(tabPlots$tp[2*1:180][x]==3){
+                crossNext3 <- append(crossNext3,currBd)
+              }else if(tabPlots$tp[2*1:180][x]==4){
+                crossNext4 <- append(crossNext4,currBd)
+              }else if(tabPlots$tp[2*1:180][x]==5){
+                crossNext5 <- append(crossNext5,currBd)
+              }
+            }else if(tabPlots$tp[2*1:180][x]==1&tabPlots$tp[2*1:180][y]==5){
+              cross5 <- append(cross5,currBd)
+            }
+          }
+        }else{
+          intTime <- append(intTime,currBd)
+          if(tabPlots$tp[2*1:180][x]==1){
+            time1 <- append(time1,currBd)
+          }else if(tabPlots$tp[2*1:180][x]==2){
+            time2 <- append(time2,currBd)
+          }else if(tabPlots$tp[2*1:180][x]==3){
+            time3 <- append(time3,currBd)
+          }else if(tabPlots$tp[2*1:180][x]==4){
+            time4 <- append(time4,currBd)
+          }else if(tabPlots$tp[2*1:180][x]==5){
+            time5 <- append(time5,currBd)
+          }else if(tabPlots$tp[2*1:180][x]==6){
+            time6 <- append(time6,currBd)
+          }
+        }
+        if(tabPlots$subplot[2*1:180][x]!=tabPlots$subplot[2*1:180][y]){
+          betPlot <- append(betPlot,currBd)
+        }else{
+          intPlot <- append(intPlot,currBd)
+          if(tabPlots$tp[2*1:180][y]-1==tabPlots$tp[2*1:180][x]){
+            intPlotNextTime <- append(intPlotNextTime,currBd)
+            if(tabPlots$tp[2*1:180][x]==1){
+              intPlotNext1 <- append(intPlotNext1,currBd)
+            }else if(tabPlots$tp[2*1:180][x]==2){
+              intPlotNext2 <- append(intPlotNext2,currBd)
+            }else if(tabPlots$tp[2*1:180][x]==3){
+              intPlotNext3 <- append(intPlotNext3,currBd)
+            }else if(tabPlots$tp[2*1:180][x]==4){
+              intPlotNext4 <- append(intPlotNext4,currBd)
+            }else if(tabPlots$tp[2*1:180][x]==5){
+              intPlotNext5 <- append(intPlotNext5,currBd)
+            }
+          }else if(tabPlots$tp[2*1:180][x]==1&tabPlots$tp[2*1:180][y]==5){
+            intPlot5 <- append(intPlot5,currBd)
+          }
+        }
+      }
+    }else{
+      currBd <- median(as.dist(as.matrix(bd)[repliFac==repl[x],repliFac==repl[y]]))
+      if(!is.na(currBd)){
+        intRep <- append(intRep,currBd)
+      }
+    }
+  }
+}
+```
+
+For an overview, we can compare the beta-diversity between subplots and within subplots, as well as compare all-vs-all distances to consecutive time points (deltas; Figure S11):
+```{r}
+{par(mar=c(1.6,3,0.5,0.5),mgp=c(1.8,0.5,0),tcl=-0.3,lwd=1.2)
+beanplot::beanplot(intPlot,cross,intPlotNextTime,crossNextTime,what=c(0,1,1,0),side="both",col=list("grey","darkred"),las=1,
+                   names=c("all time points","consecutive time points"),ylab="Soerensen distance",cex.lab=9/7,ylim=c(0.15,0.8))
+legend("top",fill=c("grey","darkred"),bty="n",legend=c("within subplots","between subplots"),horiz=T)}
+```
+
+Similarly, we can split the beta-diversity comparisons between subplots and within subplots by time points (Figure S10):
+```{r}
+{par(mar=c(1.6,3,0.5,0.5),mgp=c(1.8,0.5,0),tcl=-0.3,lwd=1.2)
+beanplot::beanplot(intPlotNext1,crossNext1,intPlotNext2,crossNext2,intPlotNext3,crossNext3,intPlotNext4,crossNext4,intPlotNext5,crossNext5,what=c(0,1,1,0),side="both",col=list("grey","darkred"),las=1,
+                   names=1:5,ylab="Soerensen distance",cex.lab=9/7,ylim=c(0.15,0.8))
+legend("top",fill=c("grey","darkred"),bty="n",legend=c("within subplots","between subplots"),horiz=T)}
+```
+
+These trends were unique to the AMF community and we did not observe a subplot-specific distance matrix for the plants or the environmental factors.
+
+#####Per-plot temporal beta-diversity#####
+We examined the development of the temporal beta-diversity of each plot. Displayed in Figure S4 in the publication.
+```{r}
+plotPlotTime(betaPartIndicesTimeDelta,3,1:5,"Soerensen","delta-interval","\ntotal dist\nSoerensen")
+```
+One idea for this was to find out if there was a spatial pattern to the development, i.e. if closer subplots behaved similar over time. However, this was not found (see Figure S5):
+```{r message=F}
+library(dendextend)
+betaPartIndicesTimeDeltaTotalMantel <- dendplots(betaPartIndicesTimeDelta,3)
+```
+
+The same analyses were performed for the *Glomus* OTUs. Results are displayed in Figure S6 in the publication.
+```{r}
+{plotPlotTime(betaPartIndicesTimeDelta_glomus,3,1:5,"Soerensen","delta-interval","\ntotal dist\nSoerensen")
+betaPartIndicesTimeDeltaTotalMantel_glomus <- dendplots(betaPartIndicesTimeDelta_glomus,3)}
+```
+
+The same analyses were performed for the *Claroidoglomus* OTUs. Results are displayed in Figure S6 in the publication.
+```{r}
+{plotPlotTime(betaPartIndicesTimeDelta_claro,3,1:5,"Soerensen","delta-interval","\ntotal dist\nSoerensen")
+betaPartIndicesTimeDeltaTotalMantel_claro <- dendplots(betaPartIndicesTimeDelta_claro,3)}
+```
+
+
+####Drivers of beta-diversity####
+Several approaches were tested to find which of the known environmental parameters influenced beta-diversity. These included permutational multivariate analysis of variance in the Soerensen dissimilarity matrix, the results of which are presented in the publication. Other approaches involved mixed models of spatial auto-correlation with environmental factors, correlation analyses, correlation of the development of the beta-diversity as shown above, and the inclusion of environmental parameters in the models of spatial and temporal turnover as detailed in the next section. Since none of these analyses yielded any drivers that could explain an interesting part of the beta-diversity, we decided to only reported the most straight-forward analysis.
+
+For this analysis, we used the Soerensen dissimilarity matrix of the rarefied OTU table. To account for the two samples in each subplot, we used the mean distance of these samples to the other pairs of samples.
+```{r}
+otuDist <- as.matrix(vegdist(otuRB,binary = T))
+otuDistDup <- matrix(0,nrow=nrow(otuRB)/2,ncol=nrow(otuRB)/2)
+for(i in 1:nrow(otuDistDup)){
+  for(j in 1:ncol(otuDistDup)){
+    otuDistDup[i,j] <- mean(otuDist[(i-1)*2+1:2,(j-1)*2+1:2])
+  }
+}
+
+dataE <- data.frame("subplot"=as.factor(paste0("subplot_",1:30)),
+                    aggregate(apply(env[,-c(1,50)],2,function(x)scale(x,center = T,scale = T)),list(envSubplot),mean),
+                    stringsAsFactors = F)
+```
+
+In the first step, we checked all interesting environmental parameters for a significant explanatory potential of the beta-diversity. We used the adonis function, stratefying the data by sampling time point.
+```{r}
+for(a in colnames(dataE)[-c(1:2,6:7,11,36,38:50,55:56)]){
+  ad_d3 <- adonis(as.dist(otuDistDup)~sapply(1:(nrow(env)/2),function(x) mean(scale(env[[a]],scale = T,center=T)[(x-1)*2+1:2])),
+                  strata = env$date[2*1:(nrow(env)/2)])
+  if(ad_d3$aov.tab[1,6]<0.05 & ad_d3$aov.tab[1,5]>0.0){
+    print(a)
+    print(ad_d3$aov.tab[1,5:6])
+  }}
+```
+
+In the second step, all significant environmental parameters from the first step are added in order of their explanatory value into one adonis model, again stratefying the data by sampling time point. 
+```{r} 
+adonis(as.dist(otuDistDup)~sapply(1:(nrow(env)/2),function(x) mean(scale(env$x,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$y,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$Claypercent,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$pH,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$Nmic,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$CNmic,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$PO4,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$EON,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$GramNegBac,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$Npercent,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$Cmic,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$Cpercent,scale = T,center=T)[(x-1)*2+1:2]))
+                 +sapply(1:(nrow(env)/2),function(x) mean(scale(env$BacTot,scale = T,center=T)[(x-1)*2+1:2])),
+                 strata = env$date[2*1:(nrow(env)/2)])
+```
+
+
+####Analysis inspired by Mellin *et al*.####
+
+#####Neighbourhoods for spatial turnover#####
+To define neighbourhoods within the plot, we use the distance between the sampling points on the different subplots. 
+
+```{r}
+tabPlotsCo <- data.frame(tabPlots,env[,c("x","y")],stringsAsFactors = F)
+#calculate the distance between all samples occuring at the same timepoints
+meanxy <- aggregate(tabPlotsCo[,c("x","y")],list(paste0(tabPlotsCo$subplot,"_tp_",tabPlotsCo$tp)),mean)
+distxy <- as.matrix(dist(meanxy[,c("x","y")]))
+colnames(distxy) <- meanxy$Group.1 
+rownames(distxy) <- meanxy$Group.1 
+mdist <- max(sapply(1:6,function(y) max(apply(distxy[grep(paste0("_tp_",y),rownames(distxy)),grep(paste0("_tp_",y),colnames(distxy))],1,function(x) min(x[x>0])))))
+```
+
+The defining distance for neighbours is `r round(mdist,2)` m. It is the minimal distance that allows every sample to have at least one neighbour at the same time point. All samples that fall into this radius around one sample and that were taken at the same time are considered neighbours of one subplot. 
+
+**The following chunks show the calculations for a single rarefaction of the whole OTU table.**
+
+#####Spatial beta-SOR for each subplot#####
+The mean Soerensen indices between the samples and all neighbours are calculated for each subplot at each point in time. The averages over the 6 time points are stored for each subplot.
+```{r}
+#calculate spatial turnover (Soerensen index to neighbours) for each subplot
+betaPartIndicesNeighboursRm <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                      dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:6){
+    neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+    betaPartIndicesNeighboursRm[6*(p-1)+t,] <- unlist(beta.sample.kezia(otuRB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+  }
+  p <- p + 1
+}
+spatm_subplots <- sapply(1:30,function(x) mean(betaPartIndicesNeighboursRm[(x-1)*6+1:6,3]))
+names(spatm_subplots) <- paste0("subplot_",1:30)
+```
+
+#####Temporal beta-SOR for each subplot#####
+The mean Soerensen indices between the samples of each subplot and the samples of the same subplot at the next time point are calculated for the first 5 time points. The averages are stored for each subplot.
+```{r}
+betaPartIndicesTimeDeltaR <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                    dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:5){
+    betaPartIndicesTimeDeltaR[5*(p-1)+t,] <- unlist(beta.sample.kezia(otuRB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+  }
+  p <- p + 1
+}
+temp_subplots <- sapply(1:30,function(x) mean(betaPartIndicesTimeDeltaR[(x-1)*5+1:5,3]))
+names(temp_subplots) <- paste0("subplot_",1:30)
+```
+
+#####Relationship between temporal and spatial beta-SOR#####
+As we have one temporal and spatial beta-SOR value each for the subplots, we can examine their relationship.
+```{r}
+par(mar=c(4,4,0.5,0.5),tcl=-0.2,mgp=c(2,0.5,0),lwd=1.5)
+plot(spatm_subplots,temp_subplots,col=spcols,pch=16,ylab="temporal turnover",xlab="spatial turnover",las=1)
+```
+
+The same data, with a linear model fitted, as in the publication.
+```{r warning=FALSE}
+data2 <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                    "spatial"=spatm_subplots,
+                    "temporal"=temp_subplots,
+                    "co"=as.factor(rep(1:6,times=5)),
+                    "ro"=as.factor(rep(1:5,each=6)),
+                    "corners"=as.factor(c(1,1,2,2,3,3,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,7,7,8,8,9,9)),
+                    aggregate(env,list(envSubplot),mean),
+                    stringsAsFactors = F)
+mod_lm1<-lm(temporal~spatial,data=data2)
+{par(mar=c(4,4,0.5,0.5),tcl=-0.2,mgp=c(2.4,0.5,0),lwd=1.5)
+plot(temporal~spatial, data=data2, type="n", pch=16, las=1, cex.lab=12/7, cex.axis=1.2,
+     xlab=expression(paste("spatial ", beta)["SOR"]),
+     ylab=expression(paste("temporal ", beta)["SOR"]),ylim=c(0.25,0.65))
+points(temporal~spatial, data=data2, pch=16, las=1)
+curve(predict(mod_lm1,data.frame(spatial=x),type="resp"),add = T,lwd=2,col="grey10")
+curve(predict(mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$fit+
+        1.96*predict(mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$se.fit,add = T,lty=3,col="grey60")
+curve(predict(mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$fit-
+        1.96*predict(mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$se.fit,add = T,lty=3,col="grey60")}
+
+```
+
+#####Relationship between temporal and spatial beta-SOR for a subset of OTUs - e.g. *Glomus*#####
+Again, the mean Soerensen indices between the samples and all neighbours are calculated for each subplot at each point in time, but based on an OTU-table that contains only *Glomus* OTUs. The averages over the 6 time points are again stored for each subplot.
+```{r}
+glomusbetaPartIndicesNeighboursRm <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                            dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:6){
+    neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+    glomusbetaPartIndicesNeighboursRm[6*(p-1)+t,] <- unlist(beta.sample.kezia(otuRB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,colnames(otuRB) %in% colnames(glomusPre)],tps=length(neighbours))$mean.values)
+  }
+  p <- p + 1
+}
+glomus_spatm_subplots <- sapply(1:30,function(x) mean(glomusbetaPartIndicesNeighboursRm[(x-1)*6+1:6,3]))
+names(glomus_spatm_subplots) <- paste0("subplot_",1:30)
+```
+Similarly, the mean Soerensen indices between the samples of each subplot and the samples of the same subplot at the next time point are calculated for the first 5 time points, again using a reduced OTU-table with only *Glomus* OTUs. The averages are again stored for each subplot.
+```{r}
+glomusbetaPartIndicesTimeDeltaR <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                          dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:5){
+    glomusbetaPartIndicesTimeDeltaR[5*(p-1)+t,] <- unlist(beta.sample.kezia(otuRB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),colnames(otuRB) %in% colnames(glomusPre)],tps=2)$mean.values)
+  }
+  p <- p + 1
+}
+glomus_temp_subplots <- sapply(1:30,function(x) mean(glomusbetaPartIndicesTimeDeltaR[(x-1)*5+1:5,3]))
+names(glomus_temp_subplots) <- paste0("subplot_",1:30)
+```
+
+The publication features this plot of the results.
+```{r warning=FALSE}
+glomus_data3 <- data.frame("subplot"=as.factor(names(glomus_spatm_subplots)),
+                           "spatial"=glomus_spatm_subplots,
+                           "temporal"=glomus_temp_subplots,
+                           aggregate(apply(env[,-c(1,50)],2,function(x)scale(x,center = T,scale = T)),list(envSubplot),mean),
+                           stringsAsFactors = F)
+glomus_mod_lm1<-lm(temporal~spatial,data=glomus_data3)
+{par(mar=c(4,4,0.5,0.5),tcl=-0.2,mgp=c(2.4,0.5,0),lwd=1.5)
+plot(temporal~spatial, data=glomus_data3, type="n", pch=16, las=1, cex.lab=12/7, cex.axis=1.2,xlab=expression(paste("spatial ", beta)["SOR"]),
+                                                ylab=expression(paste("temporal ", beta)["SOR"]),ylim=c(0.25,0.65))
+                                           points(temporal~spatial, data=glomus_data3, pch=16, las=1)
+                                           curve(predict(glomus_mod_lm1,data.frame(spatial=x),type="resp"),add = T,lwd=2,col="grey10")
+                                           curve(predict(glomus_mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$fit+
+                                                   1.96*predict(glomus_mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$se.fit,add = T,lty=3,col="grey60")
+                                           curve(predict(glomus_mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$fit-
+                                                   1.96*predict(glomus_mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$se.fit,add = T,lty=3,col="grey60")}
+
+```
+
+#####Relationship between temporal and spatial beta-SOR for a subset of OTUs - e.g. *Claroidoglomus*#####
+Again, the mean Soerensen indices between the samples and all neighbours are calculated for each subplot at each point in time, but based on an OTU-table that contains only *Claroidoglomus* OTUs. The averages over the 6 time points are again stored for each subplot.
+```{r}
+clarobetaPartIndicesNeighboursRm <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                           dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:6){
+    neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+    clarobetaPartIndicesNeighboursRm[6*(p-1)+t,] <- unlist(beta.sample.kezia(otuRB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,colnames(otuRB) %in% colnames(claroPre)],tps=length(neighbours))$mean.values)
+  }
+  p <- p + 1
+}
+claro_spatm_subplots <- sapply(1:30,function(x) mean(clarobetaPartIndicesNeighboursRm[(x-1)*6+1:6,3]))
+names(claro_spatm_subplots) <- paste0("subplot_",1:30)
+
+```
+Similarly, the mean Soerensen indices between the samples of each subplot and the samples of the same subplot at the next time point are calculated for the first 5 time points, again using a reduced OTU-table with only *Claroidoglomus* OTUs. The averages are again stored for each subplot.
+```{r}
+clarobetaPartIndicesTimeDeltaR <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                         dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+p <- 1
+for(i in subplots){
+  for(t in 1:5){
+    clarobetaPartIndicesTimeDeltaR[5*(p-1)+t,] <- unlist(beta.sample.kezia(otuRB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),colnames(otuRB) %in% colnames(claroPre)],tps=2)$mean.values)
+  }
+  p <- p + 1
+}
+claro_temp_subplots <- sapply(1:30,function(x) mean(clarobetaPartIndicesTimeDeltaR[(x-1)*5+1:5,3]))
+names(claro_temp_subplots) <- paste0("subplot_",1:30)
+```
+
+The publication features this plot of the results.
+```{r warning=FALSE}
+claro_data3 <- data.frame("subplot"=as.factor(names(claro_spatm_subplots)),
+                          "spatial"=claro_spatm_subplots,
+                          "temporal"=claro_temp_subplots,
+                          aggregate(apply(env[,-c(1,50)],2,function(x)scale(x,center = T,scale = T)),list(envSubplot),mean),
+                          stringsAsFactors = F)
+claro_mod_lm1<-lm(temporal~spatial,data=claro_data3)
+{par(mar=c(4,4,0.5,0.5),tcl=-0.2,mgp=c(2.4,0.5,0),lwd=1.5)
+plot(temporal~spatial, data=claro_data3, type="n", pch=16, las=1, cex.lab=12/7, cex.axis=1.2,xlab=expression(paste("spatial ", beta)["SOR"]),
+                                                ylab=expression(paste("temporal ", beta)["SOR"]),ylim=c(0.25,0.65))
+                                           points(temporal~spatial, data=claro_data3, pch=16, las=1)
+                                           curve(predict(claro_mod_lm1,data.frame(spatial=x),type="resp"),add = T,lwd=2,col="grey10")
+                                           curve(predict(claro_mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$fit+
+                                                   1.96*predict(claro_mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$se.fit,add = T,lty=3,col="grey60")
+                                           curve(predict(claro_mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$fit-
+                                                   1.96*predict(claro_mod_lm1,data.frame(spatial=x),type="resp",se.fit = T)$se.fit,add = T,lty=3,col="grey60")}
+
+```
+
+**The analysis was repeated 1000 times to compare the models to null models.**
+To do this, we first determine the number of reads we can rarefy to.
+```{r}
+rarf <- min(rowSums(otuM))
+```
+For the null models, we calculate the probability for each OTU to be in rarefied datasets. We test three options: the whole OTU table, sampling time point-specific tables (with different probabilities at every time point), and subplot-specific tables (with different probabilities in every subplot). The probabilities are then used to constrain the permutatitions of the OTU table for the null-models (essentially OTU tables generated by drawing the same number of reads from OTUs with different probabilities).
+```{r}
+otuTotal <- colSums(otuM)
+otuPvec <- drarefy(otuTotal,min(rowSums(otuM)))
+otuPmmat <- sapply(1:6,function(x) drarefy(colSums(otuM[((x-1)*60+1):(x*60),]),min(rowSums(otuM)[((x-1)*60+1):(x*60)])))
+otuPsmat <- sapply(1:30,function(x) drarefy(colSums(otuM[rep((0:5)*60,each=2)+((x-1)*2+(1:2)),]),min(rowSums(otuM)[rep((0:5)*60,each=2)+((x-1)*2+(1:2))])))
+```
+List-objects to store the coefficients and their p-values for all rarefactions are initiated.
+```{r}
+coef_list <- vector("numeric",0)
+sig_list <- vector("numeric",0)
+coef0_list <- vector("numeric",0)
+sig0_list <- vector("numeric",0)
+coef0m_list <- vector("numeric",0)
+sig0m_list <- vector("numeric",0)
+coef0s_list <- vector("numeric",0)
+sig0s_list <- vector("numeric",0)
+claro_coef_list <- vector("numeric",0)
+claro_sig_list <- vector("numeric",0)
+claro_coef0_list <- vector("numeric",0)
+claro_sig0_list <- vector("numeric",0)
+claro_coef0m_list <- vector("numeric",0)
+claro_sig0m_list <- vector("numeric",0)
+claro_coef0s_list <- vector("numeric",0)
+claro_sig0s_list <- vector("numeric",0)
+glomus_coef_list <- vector("numeric",0)
+glomus_sig_list <- vector("numeric",0)
+glomus_coef0_list <- vector("numeric",0)
+glomus_sig0_list <- vector("numeric",0)
+glomus_coef0m_list <- vector("numeric",0)
+glomus_sig0m_list <- vector("numeric",0)
+glomus_coef0s_list <- vector("numeric",0)
+glomus_sig0s_list <- vector("numeric",0)
+```
+Finally, we loop over the same analysis as before. (This takes long to run.)
+```{r results=F,warning=F}
+for(i in 1:1000){
+  #print(i)
+  # just rarefaction:
+  permotuMR <- rrarefy(otuM,rarf)
+  permotuMR <- permotuMR
+  permotuRB <- matrix(as.numeric(permotuMR>0),ncol=ncol(permotuMR),nrow=nrow(permotuMR),dimnames = dimnames(permotuMR))
+  permotuRB <- permotuRB[,colSums(permotuRB)>0]
+  
+  #spatial beta-SOR
+  permbetaPartIndicesNeighboursRm <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                            dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      permbetaPartIndicesNeighboursRm[6*(p-1)+t,] <- unlist(beta.sample.kezia(permotuRB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  permspatm_subplots <- sapply(1:30,function(x) mean(permbetaPartIndicesNeighboursRm[(x-1)*6+1:6,3]))
+  names(permspatm_subplots) <- paste0("subplot_",1:30)
+  
+  #temporal beta-SOR
+  permbetaPartIndicesTimeDeltaR <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                          dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      permbetaPartIndicesTimeDeltaR[5*(p-1)+t,] <- unlist(beta.sample.kezia(permotuRB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  permtemp_subplots <- sapply(1:30,function(x) mean(permbetaPartIndicesTimeDeltaR[(x-1)*5+1:5,3]))
+  names(permtemp_subplots) <- paste0("subplot_",1:30)
+  
+  #model for rarefied data:
+  permdata2 <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                          "spatial"=permspatm_subplots,
+                          "temporal"=permtemp_subplots,
+                          stringsAsFactors = F)
+  
+  permmod_lm1<-lm(temporal~spatial,data=permdata2)
+  coef_list <- append(coef_list,permmod_lm1$coefficients[2])
+  sig_list <- append(sig_list,summary(permmod_lm1)$coefficients[2,4])
+  
+  #generation of a null-model with the whole OTU table:
+  permrich <- apply(permotuMR,1,function(x)length(which(x>0)))
+  permotu0B <- matrix(as.numeric(sapply(1:360,function(x) 1:ncol(permotuMR) %in% sample(1:ncol(otuM),permrich[x],F,otuPvec))),
+                      ncol=ncol(permotuMR),nrow=nrow(permotuMR),dimnames = dimnames(permotuMR),byrow=T)
+  permotu0B <- permotu0B[,colSums(permotu0B)>0]
+  
+  #analysis of the nullmodel is analogous to rarefied table:
+  permbetaPartIndicesNeighboursRm0 <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                             dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      permbetaPartIndicesNeighboursRm0[6*(p-1)+t,] <- unlist(beta.sample.kezia(permotu0B[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  permspatm_subplots0 <- sapply(1:30,function(x) mean(permbetaPartIndicesNeighboursRm0[(x-1)*6+1:6,3]))
+  names(permspatm_subplots0) <- paste0("subplot_",1:30)
+  
+  permbetaPartIndicesTimeDeltaR0 <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                           dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      permbetaPartIndicesTimeDeltaR0[5*(p-1)+t,] <- unlist(beta.sample.kezia(permotu0B[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  permtemp_subplots0 <- sapply(1:30,function(x) mean(permbetaPartIndicesTimeDeltaR0[(x-1)*5+1:5,3]))
+  names(permtemp_subplots0) <- paste0("subplot_",1:30)
+  
+  permdata20 <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                           "spatial"=permspatm_subplots0,
+                           "temporal"=permtemp_subplots0,
+                           stringsAsFactors = F)
+  
+  permmod_lm10<-lm(temporal~spatial,data=permdata20)
+  coef0_list <- append(coef0_list,permmod_lm10$coefficients[2])
+  sig0_list <- append(sig0_list,summary(permmod_lm10)$coefficients[2,4])
+  
+  
+  #generation of a null-model with constrains based on the probabilities of each OTU occuring at a certain time point:
+  permotu0mB <- matrix(sapply(1:6,function(y) as.numeric(sapply(((y-1)*60+1):(y*60),function(x) 1:ncol(permotuMR) %in% sample(1:ncol(otuM),
+                                                                                                                              permrich[x],F,otuPmmat[,y])))),
+                       ncol=ncol(permotuMR),nrow=nrow(permotuMR),dimnames = dimnames(permotuMR),byrow=T)
+  permotu0mB <- permotu0mB[,colSums(permotu0mB)>0]
+  
+  #analysis as always:
+  permbetaPartIndicesNeighboursRm0m <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                              dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      permbetaPartIndicesNeighboursRm0m[6*(p-1)+t,] <- unlist(beta.sample.kezia(permotu0mB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  permspatm_subplots0m <- sapply(1:30,function(x) mean(permbetaPartIndicesNeighboursRm0m[(x-1)*6+1:6,3]))
+  names(permspatm_subplots0m) <- paste0("subplot_",1:30)
+
+    permbetaPartIndicesTimeDeltaR0m <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                            dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      permbetaPartIndicesTimeDeltaR0m[5*(p-1)+t,] <- unlist(beta.sample.kezia(permotu0mB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  permtemp_subplots0m <- sapply(1:30,function(x) mean(permbetaPartIndicesTimeDeltaR0m[(x-1)*5+1:5,3]))
+  names(permtemp_subplots0m) <- paste0("subplot_",1:30)
+  
+  permdata20m <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                            "spatial"=permspatm_subplots0m,
+                            "temporal"=permtemp_subplots0m,
+                            stringsAsFactors = F)
+  
+  permmod_lm10m<-lm(temporal~spatial,data=permdata20m)
+  coef0m_list <- append(coef0m_list,permmod_lm10m$coefficients[2])
+  sig0m_list <- append(sig0m_list,summary(permmod_lm10m)$coefficients[2,4])
+  
+  #generation of a null-model with constrains based on the probabilities of each OTU occuring in a certain subplot:
+  permotu0sB <- matrix(as.numeric(sapply(1:360,function(x) 1:ncol(permotuMR) %in% sample(1:ncol(otuM),
+                                                                                         permrich[x],F,otuPsmat[,envSubplot[x]]))),
+                       ncol=ncol(permotuMR),nrow=nrow(permotuMR),dimnames = dimnames(permotuMR),byrow=T)
+  permotu0sB <- permotu0sB[,colSums(permotu0sB)>0]
+  
+  permbetaPartIndicesNeighboursRm0s <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                              dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      permbetaPartIndicesNeighboursRm0s[6*(p-1)+t,] <- unlist(beta.sample.kezia(permotu0sB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  permspatm_subplots0s <- sapply(1:30,function(x) mean(permbetaPartIndicesNeighboursRm0s[(x-1)*6+1:6,3]))
+  names(permspatm_subplots0s) <- paste0("subplot_",1:30)
+  
+  permbetaPartIndicesTimeDeltaR0s <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                            dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      permbetaPartIndicesTimeDeltaR0s[5*(p-1)+t,] <- unlist(beta.sample.kezia(permotu0sB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  permtemp_subplots0s <- sapply(1:30,function(x) mean(permbetaPartIndicesTimeDeltaR0s[(x-1)*5+1:5,3]))
+  names(permtemp_subplots0s) <- paste0("subplot_",1:30)
+  
+  permdata20s <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                            "spatial"=permspatm_subplots0s,
+                            "temporal"=permtemp_subplots0s,
+                            stringsAsFactors = F)
+  
+  permmod_lm10s<-lm(temporal~spatial,data=permdata20s)
+  coef0s_list <- append(coef0s_list,permmod_lm10s$coefficients[2])
+  sig0s_list <- append(sig0s_list,summary(permmod_lm10s)$coefficients[2,4])
+  
+  #the same analysis for Claroidoglomus:
+  # we use the same rarefied, presence-absence OTU table, but keep only OTUs that are present in the Claroidoglomus-table:
+  claroPermotuRB <- permotuRB[,colnames(permotuRB) %in% colnames(claroPre)[-c(1:3)]]
+  
+  #spatial and temporal beta-SORs
+  claroPermbetaPartIndicesNeighboursRm <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                                 dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      claroPermbetaPartIndicesNeighboursRm[6*(p-1)+t,] <- unlist(beta.sample.kezia(claroPermotuRB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  claroPermspatm_subplots <- sapply(1:30,function(x) mean(claroPermbetaPartIndicesNeighboursRm[(x-1)*6+1:6,3]))
+  names(claroPermspatm_subplots) <- paste0("subplot_",1:30)
+  
+  claroPermbetaPartIndicesTimeDeltaR <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                               dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      claroPermbetaPartIndicesTimeDeltaR[5*(p-1)+t,] <- unlist(beta.sample.kezia(claroPermotuRB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  claroPermtemp_subplots <- sapply(1:30,function(x) mean(claroPermbetaPartIndicesTimeDeltaR[(x-1)*5+1:5,3]))
+  names(claroPermtemp_subplots) <- paste0("subplot_",1:30)
+  
+  #model:
+  claroPermdata2 <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                               "spatial"=claroPermspatm_subplots,
+                               "temporal"=claroPermtemp_subplots,
+                               stringsAsFactors = F)
+  
+  claroPermmod_lm1<-lm(temporal~spatial,data=claroPermdata2)
+  claro_coef_list <- append(claro_coef_list,claroPermmod_lm1$coefficients[2])
+  claro_sig_list <- append(claro_sig_list,summary(claroPermmod_lm1)$coefficients[2,4])
+  
+  #null model (whole OTU table):
+  claroPermotu0B <- permotu0B[,colnames(permotu0B) %in% colnames(claroPre)[-c(1:3)]]
+  
+  claroPermbetaPartIndicesNeighboursRm0 <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                                  dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      claroPermbetaPartIndicesNeighboursRm0[6*(p-1)+t,] <- unlist(beta.sample.kezia(claroPermotu0B[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  claroPermspatm_subplots0 <- sapply(1:30,function(x) mean(claroPermbetaPartIndicesNeighboursRm0[(x-1)*6+1:6,3]))
+  names(claroPermspatm_subplots0) <- paste0("subplot_",1:30)
+  
+  claroPermbetaPartIndicesTimeDeltaR0 <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                                dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      claroPermbetaPartIndicesTimeDeltaR0[5*(p-1)+t,] <- unlist(beta.sample.kezia(claroPermotu0B[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  claroPermtemp_subplots0 <- sapply(1:30,function(x) mean(claroPermbetaPartIndicesTimeDeltaR0[(x-1)*5+1:5,3]))
+  names(claroPermtemp_subplots0) <- paste0("subplot_",1:30)
+  
+  claroPermdata20 <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                                "spatial"=claroPermspatm_subplots0,
+                                "temporal"=claroPermtemp_subplots0,
+                                stringsAsFactors = F)
+  
+  claroPermmod_lm10<-lm(temporal~spatial,data=claroPermdata20)
+  claro_coef0_list <- append(claro_coef0_list,claroPermmod_lm10$coefficients[2])
+  claro_sig0_list <- append(claro_sig0_list,summary(claroPermmod_lm10)$coefficients[2,4])
+  
+  #nullmodel (time-point constrained) - for this we use the constrained full OTU table, again keeping only the Claroidoglumus OTUs:
+  claroPermotu0mB <- permotu0mB[,colnames(permotu0mB) %in% colnames(claroPre)[-c(1:3)]]
+  
+  claroPermbetaPartIndicesNeighboursRm0m <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                                   dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      claroPermbetaPartIndicesNeighboursRm0m[6*(p-1)+t,] <- unlist(beta.sample.kezia(claroPermotu0mB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  claroPermspatm_subplots0m <- sapply(1:30,function(x) mean(claroPermbetaPartIndicesNeighboursRm0m[(x-1)*6+1:6,3]))
+  names(claroPermspatm_subplots0m) <- paste0("subplot_",1:30)
+  
+  claroPermbetaPartIndicesTimeDeltaR0m <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                                 dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      claroPermbetaPartIndicesTimeDeltaR0m[5*(p-1)+t,] <- unlist(beta.sample.kezia(claroPermotu0mB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  claroPermtemp_subplots0m <- sapply(1:30,function(x) mean(claroPermbetaPartIndicesTimeDeltaR0m[(x-1)*5+1:5,3]))
+  names(claroPermtemp_subplots0m) <- paste0("subplot_",1:30)
+  
+  claroPermdata20m <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                                 "spatial"=claroPermspatm_subplots0m,
+                                 "temporal"=claroPermtemp_subplots0m,
+                                 stringsAsFactors = F)
+  
+  claroPermmod_lm10m<-lm(temporal~spatial,data=claroPermdata20m)
+  claro_coef0m_list <- append(claro_coef0m_list,claroPermmod_lm10m$coefficients[2])
+  claro_sig0m_list <- append(claro_sig0m_list,summary(claroPermmod_lm10m)$coefficients[2,4])
+  
+  #nullmodel (subplot constrained):
+  claroPermotu0sB <- permotu0sB[,colnames(permotu0sB) %in% colnames(claroPre)[-c(1:3)]]
+  
+  claroPermbetaPartIndicesNeighboursRm0s <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                                   dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      claroPermbetaPartIndicesNeighboursRm0s[6*(p-1)+t,] <- unlist(beta.sample.kezia(claroPermotu0sB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  claroPermspatm_subplots0s <- sapply(1:30,function(x) mean(claroPermbetaPartIndicesNeighboursRm0s[(x-1)*6+1:6,3]))
+  names(claroPermspatm_subplots0s) <- paste0("subplot_",1:30)
+  
+  claroPermbetaPartIndicesTimeDeltaR0s <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                                 dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      claroPermbetaPartIndicesTimeDeltaR0s[5*(p-1)+t,] <- unlist(beta.sample.kezia(claroPermotu0sB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  claroPermtemp_subplots0s <- sapply(1:30,function(x) mean(claroPermbetaPartIndicesTimeDeltaR0s[(x-1)*5+1:5,3]))
+  names(claroPermtemp_subplots0s) <- paste0("subplot_",1:30)
+  
+  claroPermdata20s <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                                 "spatial"=claroPermspatm_subplots0s,
+                                 "temporal"=claroPermtemp_subplots0s,
+                                 stringsAsFactors = F)
+  
+  claroPermmod_lm10s<-lm(temporal~spatial,data=claroPermdata20s)
+  claro_coef0s_list <- append(claro_coef0s_list,claroPermmod_lm10s$coefficients[2])
+  claro_sig0s_list <- append(claro_sig0s_list,summary(claroPermmod_lm10s)$coefficients[2,4])
+  
+  #same analysis only for Glomus OTUs:
+  glomusPermotuRB <- permotuRB[,colnames(permotuRB) %in% colnames(glomusPre)[-c(1:3)]]
+  
+  #beta-SORs:
+  glomusPermbetaPartIndicesNeighboursRm <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                                  dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      glomusPermbetaPartIndicesNeighboursRm[6*(p-1)+t,] <- unlist(beta.sample.kezia(glomusPermotuRB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  glomusPermspatm_subplots <- sapply(1:30,function(x) mean(glomusPermbetaPartIndicesNeighboursRm[(x-1)*6+1:6,3]))
+  names(glomusPermspatm_subplots) <- paste0("subplot_",1:30)
+  
+  glomusPermbetaPartIndicesTimeDeltaR <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                                dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      glomusPermbetaPartIndicesTimeDeltaR[5*(p-1)+t,] <- unlist(beta.sample.kezia(glomusPermotuRB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  glomusPermtemp_subplots <- sapply(1:30,function(x) mean(glomusPermbetaPartIndicesTimeDeltaR[(x-1)*5+1:5,3]))
+  names(glomusPermtemp_subplots) <- paste0("subplot_",1:30)
+  
+  glomusPermdata2 <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                                "spatial"=glomusPermspatm_subplots,
+                                "temporal"=glomusPermtemp_subplots,
+                                stringsAsFactors = F)
+  
+  glomusPermmod_lm1<-lm(temporal~spatial,data=glomusPermdata2)
+  glomus_coef_list <- append(glomus_coef_list,glomusPermmod_lm1$coefficients[2])
+  glomus_sig_list <- append(glomus_sig_list,summary(glomusPermmod_lm1)$coefficients[2,4])
+  
+  #nullmodels:
+  glomusPermotu0B <- permotu0B[,colnames(permotu0B) %in% colnames(glomusPre)[-c(1:3)]]
+  
+  glomusPermbetaPartIndicesNeighboursRm0 <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                                   dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      glomusPermbetaPartIndicesNeighboursRm0[6*(p-1)+t,] <- unlist(beta.sample.kezia(glomusPermotu0B[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  glomusPermspatm_subplots0 <- sapply(1:30,function(x) mean(glomusPermbetaPartIndicesNeighboursRm0[(x-1)*6+1:6,3]))
+  names(glomusPermspatm_subplots0) <- paste0("subplot_",1:30)
+  glomusPermbetaPartIndicesTimeDeltaR0 <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                                 dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      glomusPermbetaPartIndicesTimeDeltaR0[5*(p-1)+t,] <- unlist(beta.sample.kezia(glomusPermotu0B[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  glomusPermtemp_subplots0 <- sapply(1:30,function(x) mean(glomusPermbetaPartIndicesTimeDeltaR0[(x-1)*5+1:5,3]))
+  names(glomusPermtemp_subplots0) <- paste0("subplot_",1:30)
+  
+  glomusPermdata20 <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                                 "spatial"=glomusPermspatm_subplots0,
+                                 "temporal"=glomusPermtemp_subplots0,
+                                 stringsAsFactors = F)
+  
+  glomusPermmod_lm10<-lm(temporal~spatial,data=glomusPermdata20)
+  glomus_coef0_list <- append(glomus_coef0_list,glomusPermmod_lm10$coefficients[2])
+  glomus_sig0_list <- append(glomus_sig0_list,summary(glomusPermmod_lm10)$coefficients[2,4])
+  
+  #nullmodel (time point)
+  glomusPermotu0mB <- permotu0mB[,colnames(permotu0mB) %in% colnames(glomusPre)[-c(1:3)]]
+  
+  glomusPermbetaPartIndicesNeighboursRm0m <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                                    dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      glomusPermbetaPartIndicesNeighboursRm0m[6*(p-1)+t,] <- unlist(beta.sample.kezia(glomusPermotu0mB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  glomusPermspatm_subplots0m <- sapply(1:30,function(x) mean(glomusPermbetaPartIndicesNeighboursRm0m[(x-1)*6+1:6,3]))
+  names(glomusPermspatm_subplots0m) <- paste0("subplot_",1:30)
+  glomusPermbetaPartIndicesTimeDeltaR0m <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                                  dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      glomusPermbetaPartIndicesTimeDeltaR0m[5*(p-1)+t,] <- unlist(beta.sample.kezia(glomusPermotu0mB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  glomusPermtemp_subplots0m <- sapply(1:30,function(x) mean(glomusPermbetaPartIndicesTimeDeltaR0m[(x-1)*5+1:5,3]))
+  names(glomusPermtemp_subplots0m) <- paste0("subplot_",1:30)
+  
+  glomusPermdata20m <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                                  "spatial"=glomusPermspatm_subplots0m,
+                                  "temporal"=glomusPermtemp_subplots0m,
+                                  stringsAsFactors = F)
+  
+  glomusPermmod_lm10m<-lm(temporal~spatial,data=glomusPermdata20m)
+  glomus_coef0m_list <- append(glomus_coef0m_list,glomusPermmod_lm10m$coefficients[2])
+  glomus_sig0m_list <- append(glomus_sig0m_list,summary(glomusPermmod_lm10m)$coefficients[2,4])
+  
+  #nullmodel (subplot)
+  glomusPermotu0sB <- permotu0sB[,colnames(permotu0sB) %in% colnames(glomusPre)[-c(1:3)]]
+  
+  glomusPermbetaPartIndicesNeighboursRm0s <- matrix(0,nrow=length(unique(subplots))*6,ncol=3,
+                                                    dimnames=list(paste0(rep(subplots,each=6),"_tp_",1:6),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:6){
+      neighbours <- gsub("_tp_.$","",names(which(distxy[rownames(distxy)==paste0(i,"_tp_",t),grep(paste0("tp_",t),colnames(distxy))]<= mdist)))
+      glomusPermbetaPartIndicesNeighboursRm0s[6*(p-1)+t,] <- unlist(beta.sample.kezia(glomusPermotu0sB[tabPlots$subplot %in% neighbours&tabPlots$tp==t,],tps=length(neighbours))$mean.values)
+    }
+    p <- p + 1
+  }
+  glomusPermspatm_subplots0s <- sapply(1:30,function(x) mean(glomusPermbetaPartIndicesNeighboursRm0s[(x-1)*6+1:6,3]))
+  names(glomusPermspatm_subplots0s) <- paste0("subplot_",1:30)
+  glomusPermbetaPartIndicesTimeDeltaR0s <- matrix(0,nrow=length(unique(subplots))*5,ncol=3,
+                                                  dimnames=list(paste0(rep(subplots,each=5),"_delta_",1:5),c("beta.SIM","beta.SNE","beta.SOR")))
+  p <- 1
+  for(i in subplots){
+    for(t in 1:5){
+      glomusPermbetaPartIndicesTimeDeltaR0s[5*(p-1)+t,] <- unlist(beta.sample.kezia(glomusPermotu0sB[tabPlots$subplot==i&tabPlots$tp %in% c(t,t+1),],tps=2)$mean.values)
+    }
+    p <- p + 1
+  }
+  glomusPermtemp_subplots0s <- sapply(1:30,function(x) mean(glomusPermbetaPartIndicesTimeDeltaR0s[(x-1)*5+1:5,3]))
+  names(glomusPermtemp_subplots0s) <- paste0("subplot_",1:30)
+  
+  glomusPermdata20s <- data.frame("subplot"=as.factor(names(spatm_subplots)),
+                                  "spatial"=glomusPermspatm_subplots0s,
+                                  "temporal"=glomusPermtemp_subplots0s,
+                                  stringsAsFactors = F)
+  
+  glomusPermmod_lm10s<-lm(temporal~spatial,data=glomusPermdata20s)
+  glomus_coef0s_list <- append(glomus_coef0s_list,glomusPermmod_lm10s$coefficients[2])
+  glomus_sig0s_list <- append(glomus_sig0s_list,summary(glomusPermmod_lm10s)$coefficients[2,4])
+  
+  
+}
+```
+We can use histograms of the 1000 coefficients calculated for each model to compare null models and rarefied OTU tables (as in Figure S12).
+```{r}
+minp <- min(c(coef0_list,coef0m_list,coef0s_list,coef_list))
+maxp <- max(c(coef0_list,coef0m_list,coef0s_list,coef_list))
+
+{par(mar=c(4,4,0.5,0.5),tcl=-0.2,mgp=c(2,0.5,0),lwd=1.5)
+plot(hist(coef0_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,
+     hist(coef0_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l",ylim=c(0,500),las=1,ann=F,col="grey40",lty=2,lwd=2)
+mtext("b",1,2.4,cex=9/7)
+mtext("counts",2,2.4,cex=9/7)
+lines(hist(coef_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,hist(coef_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l")
+lines(hist(coef0m_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,hist(coef0m_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l",lty=3,lwd=2,col="grey70")}
+```
+For the whole OTU table, the models of the rarefactions are significantly different from the null models and the constrained null models.
+```{r}
+t.test(coef_list,coef0_list)#sig
+t.test(coef_list,coef0m_list) #sig
+t.test(coef_list,coef0s_list) #sig
+```
+For the whole OTU table, the models of the rarefactions are significantly different from the null models and the constrained null models.
+
+The *Glomus* results are similar (Figure S12):
+```{r}
+minp <- min(c(glomus_coef0_list,glomus_coef0m_list,glomus_coef0s_list,glomus_coef_list))
+maxp <- max(c(glomus_coef0_list,glomus_coef0m_list,glomus_coef0s_list,glomus_coef_list))
+
+{par(mar=c(4,4,0.5,0.5),tcl=-0.2,mgp=c(2,0.5,0),lwd=1.5)
+plot(hist(glomus_coef0_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,
+     hist(glomus_coef0_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l",ylim=c(0,500),las=1,ann=F,col="grey40",lty=2,lwd=2)
+mtext("b",1,2.4,cex=9/7)
+mtext("counts",2,2.4,cex=9/7)
+lines(hist(glomus_coef_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,hist(glomus_coef_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l")
+lines(hist(glomus_coef0m_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,hist(glomus_coef0m_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l",lty=3,lwd=2,col="grey70")}
+```
+The *Glomus* results are also significant:
+```{r}
+t.test(glomus_coef_list,glomus_coef0_list)#sig
+t.test(glomus_coef_list,glomus_coef0m_list) #sig
+t.test(glomus_coef_list,glomus_coef0s_list) #sig
+```
+The *Claroidoglomus* results are not significant (Figure S12):
+```{r}
+minp <- min(c(claro_coef0_list,claro_coef0m_list,claro_coef0s_list,claro_coef_list))
+maxp <- max(c(claro_coef0_list,claro_coef0m_list,claro_coef0s_list,claro_coef_list))
+
+{par(mar=c(4,4,0.5,0.5),tcl=-0.2,mgp=c(2,0.5,0),lwd=1.5)
+plot(hist(claro_coef0_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,
+     hist(claro_coef0_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l",ylim=c(0,300),las=1,ann=F,col="grey40",lty=2,lwd=2)
+mtext("b",1,2.4,cex=9/7)
+mtext("counts",2,2.4,cex=9/7)
+lines(hist(claro_coef_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,hist(claro_coef_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l")
+lines(hist(claro_coef0m_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$mids,hist(claro_coef0m_list,breaks=seq(minp,maxp,length.out = 40),plot=F)$counts,type="l",lty=3,lwd=2,col="grey70")}
+```
+```{r}
+t.test(claro_coef_list,claro_coef0_list)
+t.test(claro_coef_list,claro_coef0m_list) 
+t.test(claro_coef_list,claro_coef0s_list) #sig
+```
+
