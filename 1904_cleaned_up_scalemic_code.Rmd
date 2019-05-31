@@ -9,26 +9,11 @@ knit: (function(input_file, encoding) {
  output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 ---
 
-Note: This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. Try executing this chunk by clicking the *Run* button within the chunk. When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
-
-```{r include=FALSE}
-a1 <- pi/2
-b <- pi
-c1 <- a1*pi/2
-theta <- log(1:1000,c1*exp(1))[10*1:100]
-df <- data.frame(x1=exp(a1*theta)*cos(b*theta), 
-                 y1=exp(a1*theta)*sin(b*theta))
-{plot(1,type="n",axes=F,ann=F,ylim=1.15*c(-max(abs(df)),max(abs(df))),xlim=1.15*c(-max(abs(df)),max(abs(df))))
-points(df[,c("x1","y1")],cex=exp(theta-1)[1:100]/3)
-points(-df[,c("x1","y1")],cex=exp(theta-1)[1:100]/3)
-points(df$y1,-df$x1,cex=exp(theta-1)[1:100]/3)
-points(-df$y1,df$x1,cex=exp(theta-1)[1:100]/3)}
-```
-
+Note: This code is taken from an [R Markdown](http://rmarkdown.rstudio.com) Notebook. The preview shows you a rendered HTML copy of the contents of the editor. 
 
 ####Presets and reading data####
-Environmental data for the plots and an OTU table were read from disk (to run this notebook, load the environment below). 
-```{r}
+Environmental data for the plots and an OTU table were read from disk (to run the notebook, contact AHB). 
+```{r include=FALSE}
 load("1904_cleaned_up_scalemic_code_WS.RData")
 ```
 
